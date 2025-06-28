@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PLY to SOGS Converter</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header>
+        <h1>PLY to SOGS Converter</h1>
+    </header>
+
+    <main>
+        <section id="upload-section">
+            <div id="drop-area">
+                <p>Drag 'n' drop a folder of .PLY files here</p>
+                <p>or</p>
+                <input type="file" id="fileElem" multiple webkitdirectory directory style="display: none;">
+                <button id="selectFolderBtn">Select Folder</button>
+            </div>
+        </section>
+
+        <section id="processing-section">
+            <h2>Active Conversions</h2>
+            <div id="file-list">
+                <!--
+                Example of a file item (will be dynamically generated):
+                <div class="file-item" data-filename="example.ply">
+                    <div class="file-info">
+                        <span class="file-name">example.ply</span> - <span class="file-size">1.2MB</span>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" style="width: 50%;">50%</div>
+                        </div>
+                        <div class="status-message">Processing: filter_size=3 - block_size=16...</div>
+                    </div>
+                    <div class="file-actions">
+                        <button class="download-btn" style="display:none;">Download SOGS</button>
+                        <button class="delete-btn">Delete</button>
+                    </div>
+                </div>
+                -->
+            </div>
+            <p id="no-active-conversions" style="display: none; text-align:center;">No active conversions.</p>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 SOGS Converter</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/script.mjs') }}" type="module"></script>
+</body>
+</html>

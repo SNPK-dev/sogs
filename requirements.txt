@@ -1,0 +1,8 @@
+Flask>=2.0
+gunicorn>=20.0
+# If sogs-compress is a Python package, add it here:
+# sogs-compress-package-name
+
+# python-dotenv is not strictly needed if using Docker's env vars,
+# but can be kept for local non-Docker development.
+python-dotenv>=0.15

@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      # For development, you might want to mount the current directory
+      # to see code changes without rebuilding the image (Gunicorn might need --reload).
+      # - .:/usr/src/app
+
+      # You can also mount uploads and output directories to persist them on the host
+      # This is useful if you want to inspect these files easily outside the container
+      # or if you don't want them to be lost when the container is stopped/removed.
+      - ./uploads:/usr/src/app/uploads
+      - ./output:/usr/src/app/output
+    environment:
+      # Flask environment variables can be set here if needed
+      # e.g., FLASK_ENV: development (though Gunicorn is more for production)
+      # Python specific
+      PYTHONUNBUFFERED: 1
+      # App specific (defined in app.py with defaults, can be overridden)
+      # CLEANUP_INTERVAL_HOURS: 1
+      # CLEANUP_AGE_HOURS: 24
+    # If sogs-compress requires specific capabilities or devices, configure them here.
+
+# You can define named volumes for more managed persistence:
+# volumes:
+#   uploads_data:
+#   output_data:
+# Then in services.web.volumes:
+#   - uploads_data:/usr/src/app/uploads
+#   - output_data:/usr/src/app/output
