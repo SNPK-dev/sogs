@@ -235,34 +235,44 @@ def run_sogs_conversion(task_id, input_ply_path, output_sogs_path, original_file
                 task_data["progress"] = 99 # Or some other indicator that main conversion is done
                 task_data["message"] = "SOGS conversion complete, packaging output..."
 
-                # Create a ZIP file of the output directory contents
-                zip_filename_base = original_filename.rsplit('.', 1)[0]
-                # Place the zip file in the parent of output_dir_for_sogs, which is app.config['OUTPUT_FOLDER']
-                # Or, more robustly, ensure it's in a predictable location.
-                # Let's place it inside the output_dir_for_sogs for now, then adjust if needed.
-                # No, better to place it one level up, in the main OUTPUT_FOLDER or its direct task-specific subfolder.
-                # The output_dir_for_sogs is like 'output/filename_base/'
-                # The zip should be 'output/filename_base.zip' or 'output/filename_base/filename_base.zip'
+                # Retrieve the true filename base stored during upload
+                true_filename_base = task_data.get("true_filename_base")
+                if not true_filename_base:
+                    # Fallback for safety, though this shouldn't happen with new uploads
+                    print(f"Warning: true_filename_base not found for task {task_id}. Falling back to original_filename.")
+                    true_filename_base = original_filename.rsplit('.', 1)[0]
 
-                # Let's aim for output/filename_base.zip.
-                # output_sub_dir (from upload route) is 'output/filename_base'
-                # output_sogs_path (original) was 'output/filename_base/filename_base.sogs'
-                # output_dir_for_sogs is 'output/filename_base'
+                zip_filename_base = true_filename_base # Use the correct base name for the zip file
+
+                # output_dir_for_sogs is 'output/true_filename_base_from_upload/'
+                # The zip file should be placed in OUTPUT_FOLDER, so its parent is app.config['OUTPUT_FOLDER']
+                # Example: output_dir_for_sogs = 'output/My Model'
+                # os.path.dirname(output_dir_for_sogs) = 'output'
+                # zip_path should be 'output/My Model.sogs.zip'
 
                 zip_path = os.path.join(os.path.dirname(output_dir_for_sogs), f"{zip_filename_base}.sogs.zip")
+
                 # Ensure output_dir_for_sogs contains the files to be zipped.
+                # output_dir_for_sogs itself is named based on true_filename_base due to changes in upload route.
 
                 try:
                     output_files = os.listdir(output_dir_for_sogs)
                     if output_files:
-                        with shutil.make_archive(zip_path.replace('.zip', ''), 'zip', root_dir=output_dir_for_sogs, base_dir='.') as archive_name:
-                            # shutil.make_archive adds '.zip' automatically if format is 'zip'
-                            # so zip_path.replace('.zip', '') is the base name for the archive
-                            # And the final archive_name will be the full path to the zip.
-                            pass # The archive is created by the context manager
+                        # Call shutil.make_archive without the with statement
+                        # It returns the path to the archive, which should be zip_path.
+                        # We already define zip_path correctly.
+                        actual_archive_path = shutil.make_archive(zip_path.replace('.sogs.zip', ''), 'zip', root_dir=output_dir_for_sogs, base_dir='.')
+                        # shutil.make_archive appends .zip, so zip_path should be the final path.
+                        # For safety, we can check if actual_archive_path matches zip_path or assign it.
+                        # However, zip_path is constructed to be the target, e.g. 'output/filename.sogs.zip'
+                        # and make_archive base_name would be 'output/filename.sogs'
+
+                        # Ensure zip_path is what we expect after make_archive (it should append .zip to the base name)
+                        # If zip_path was 'output/base.sogs.zip', then base for make_archive is 'output/base.sogs'
+                        # make_archive will create 'output/base.sogs.zip'
 
                         # Verify zip creation and update task data
-                        if os.path.exists(zip_path):
+                        if os.path.exists(zip_path): # Check the expected zip_path
                             print(f"Successfully created ZIP archive: {zip_path} from directory {output_dir_for_sogs}")
                             task_data["output_sogs_path"] = zip_path # This is the path to the zip file
                             task_data["message"] = "Conversion successful. Output packaged as ZIP."
@@ -369,36 +379,47 @@ def upload_file_route():
 
         upload_sub_dir = os.path.join(app.config['UPLOAD_FOLDER'], *upload_relative_parts)
 
-        # New output directory structure: /output/{original_filename_without_ext}/
-        output_filename_base = original_filename.rsplit('.', 1)[0]
-        output_sub_dir = os.path.join(app.config['OUTPUT_FOLDER'], output_filename_base)
+        # Determine the true base name from the original file upload (before secure_filename for path saving)
+        # file.filename is the original name like "My Model 1.ply"
+        true_original_filename_full = file.filename
+        true_filename_base = true_original_filename_full.rsplit('.', 1)[0]
+
+        # original_filename is for the *saved* .ply file, possibly modified by secure_filename
+        # e.g., if file.filename was "../../../My Model 1.ply", original_filename would be "My_Model_1.ply"
+        # This is correct for saving the input file.
+
+        # The output subdirectory should be based on the true_filename_base
+        output_sub_dir = os.path.join(app.config['OUTPUT_FOLDER'], true_filename_base)
 
         os.makedirs(upload_sub_dir, exist_ok=True)
-        os.makedirs(output_sub_dir, exist_ok=True) # Ensure this new output directory is created
+        os.makedirs(output_sub_dir, exist_ok=True)
 
-        input_ply_path = os.path.join(upload_sub_dir, original_filename)
-        output_sogs_filename = original_filename.rsplit('.', 1)[0] + '.sogs' # sogs file will have the same name as original ply
-        output_sogs_path = os.path.join(output_sub_dir, output_sogs_filename) # Saved inside the new output_sub_dir
+        input_ply_path = os.path.join(upload_sub_dir, original_filename) # original_filename is secure name for saving
+
+        # The .sogs file *inside* the output_sub_dir should also use the true_filename_base
+        output_sogs_filename = true_filename_base + '.sogs'
+        output_sogs_path = os.path.join(output_sub_dir, output_sogs_filename)
 
         file.save(input_ply_path)
 
         with tasks_lock:
             conversion_tasks[task_id] = {
                 "task_id": task_id,
-                "status": "queued", # Changed from "uploaded"
-                "original_filename": original_filename,
+                "status": "queued",
+                "original_filename": original_filename, # This is secure_filename(file.filename)
+                "true_filename_base": true_filename_base, # Store the actual base for zip naming
                 "client_identifier": relative_path,
                 "input_ply_path": input_ply_path,
-                "output_sogs_path": output_sogs_path, # This will be the initial expectation, updated by conversion
-                "output_item_specific_dir": output_sub_dir, # Path like 'output/filename_base'
+                "output_sogs_path": output_sogs_path,
+                "output_item_specific_dir": output_sub_dir,
                 "progress": 0,
                 "message": "File uploaded, queued for conversion.",
                 "created_at": current_time,
                 "updated_at": current_time,
-                "file_size": file.content_length # Store file size
+                "file_size": file.content_length
             }
 
-        task_queue.put(task_id) # Add task_id to the queue
+        task_queue.put(task_id)
         print(f"Task {task_id} added to queue. Queue size: {task_queue.qsize()}")
 
         # Remove the direct thread start:
