@@ -299,11 +299,11 @@ def run_sogs_conversion(task_id, input_ply_path, original_filename): # output_so
                 # Ensure output_dir_for_sogs contains the files to be zipped.
                 # output_dir_for_sogs itself is named based on the sanitized true_filename_base.
 
-                # Ensure output_dir_for_sogs contains the files to be zipped.
-                # output_dir_for_sogs itself is named based on true_filename_base due to changes in upload route.
+                # Ensure output_dir_for_sogs_assets contains the files to be zipped.
+                # output_dir_for_sogs_assets itself is named based on the sanitized true_filename_base.
 
                 try:
-                    output_files = os.listdir(output_dir_for_sogs)
+                    output_files = os.listdir(output_dir_for_sogs_assets) # Corrected variable name
                     if output_files:
                         # Call shutil.make_archive.
                         # The first argument is base_name_for_archive (e.g. output/sanitized_name.sogs)
@@ -314,14 +314,14 @@ def run_sogs_conversion(task_id, input_ply_path, original_filename): # output_so
                         # For robustness, we check os.path.exists(zip_path) which uses the pre-calculated sane path.
 
                         if os.path.exists(zip_path): # Check the expected zip_path constructed with sanitized name
-                            print(f"Successfully created ZIP archive: {zip_path} (actual: {actual_archive_path}) from directory {output_dir_for_sogs}")
+                            print(f"Successfully created ZIP archive: {zip_path} (actual: {actual_archive_path}) from directory {output_dir_for_sogs_assets}") # Corrected variable name
                             task_data["output_sogs_path"] = zip_path # This is the path to the zip file
                             task_data["message"] = "Conversion successful. Output packaged as ZIP."
 
-                            # Clean up the individual files from output_dir_for_sogs now that they are zipped
-                            print(f"Cleaning up original files from {output_dir_for_sogs} after zipping.")
+                            # Clean up the individual files from output_dir_for_sogs_assets now that they are zipped
+                            print(f"Cleaning up original files from {output_dir_for_sogs_assets} after zipping.") # Corrected variable name
                             for item in output_files:
-                                item_path = os.path.join(output_dir_for_sogs, item)
+                                item_path = os.path.join(output_dir_for_sogs_assets, item) # Corrected variable name
                                 try:
                                     if os.path.isfile(item_path) or os.path.islink(item_path):
                                         os.unlink(item_path)
