@@ -50,5 +50,8 @@
     </footer>
 
     <script src="{{ url_for('static', filename='js/script.mjs') }}" type="module"></script>
+    <script type="application/json" id="existing-tasks-data">
+        {{ existing_tasks | safe }}
+    </script>
 </body>
 </html>

@@ -5,6 +5,7 @@ import shutil
 import time
 import json
 import threading
+import queue # Added for task queue
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 from werkzeug.utils import secure_filename
 
@@ -26,6 +27,64 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 conversion_tasks = {}
 tasks_lock = threading.Lock()
+task_queue = queue.Queue() # Initialize the task queue
+
+def conversion_worker():
+    print("Conversion worker thread started.")
+    while True:
+        try:
+            task_id = task_queue.get() # Blocks until a task is available
+            print(f"Worker picked up task: {task_id}")
+
+            task_details = None
+            with tasks_lock:
+                if task_id in conversion_tasks:
+                    task_details = conversion_tasks[task_id]
+                else:
+                    print(f"Worker: Task {task_id} not found in conversion_tasks. Skipping.")
+                    task_queue.task_done()
+                    continue
+
+            if task_details and task_details.get("status") == "queued":
+                input_ply_path = task_details.get("input_ply_path")
+                output_sogs_path = task_details.get("output_sogs_path")
+                original_filename = task_details.get("original_filename")
+
+                if not all([input_ply_path, output_sogs_path, original_filename]):
+                    print(f"Worker: Task {task_id} is missing critical path/name info. Setting to failed.")
+                    with tasks_lock:
+                        conversion_tasks[task_id]["status"] = "failed"
+                        conversion_tasks[task_id]["message"] = "Internal error: Task data incomplete."
+                        conversion_tasks[task_id]["updated_at"] = time.time()
+                    task_queue.task_done()
+                    continue
+
+                # Actual conversion call
+                run_sogs_conversion(task_id, input_ply_path, output_sogs_path, original_filename)
+            else:
+                # This might happen if task was deleted or status changed before worker picked it up
+                print(f"Worker: Task {task_id} not in 'queued' state or details missing. Current state: {task_details.get('status') if task_details else 'N/A'}")
+
+            task_queue.task_done() # Signal that this task is complete
+            print(f"Worker finished processing task: {task_id}")
+
+        except Exception as e:
+            print(f"Error in conversion_worker: {e}")
+            if 'task_id' in locals() and task_id: # Check if task_id was assigned
+                try:
+                    with tasks_lock:
+                         if task_id in conversion_tasks: # Check if task still exists
+                            conversion_tasks[task_id]["status"] = "failed"
+                            conversion_tasks[task_id]["message"] = f"Worker thread error: {str(e)}"
+                            conversion_tasks[task_id]["updated_at"] = time.time()
+                except Exception as inner_e:
+                    print(f"Error updating task status after worker error: {inner_e}")
+                finally:
+                    # Ensure task_done is called if a task was retrieved, even if an error occurred processing it.
+                    # This prevents the queue from potentially hanging if join() were used elsewhere,
+                    # and ensures the worker can pick up new tasks.
+                    task_queue.task_done()
+
 
 def allowed_file(filename):
     return '.' in filename and \
@@ -59,33 +118,60 @@ def perform_file_deletion(task_id, task_details):
         except OSError as e:
             print(f"Error deleting input file {input_ply_path}: {e}")
 
-    # Cleanup empty directories
+    # Cleanup empty directories helper
     def cleanup_empty_dirs(path_to_check, base_folder_path):
-        if not path_to_check or not os.path.exists(path_to_check):
+        if not path_to_check or not os.path.exists(path_to_check) or not os.path.isdir(path_to_check):
             return
         # Ensure we don't try to remove the base UPLOAD_FOLDER or OUTPUT_FOLDER itself
-        if os.path.commonpath([path_to_check, base_folder_path]) != base_folder_path or path_to_check == base_folder_path:
+        # and that path_to_check is actually a subdirectory of base_folder_path
+        if not path_to_check.startswith(base_folder_path + os.sep) or path_to_check == base_folder_path:
             return
 
         try:
-            if not os.listdir(path_to_check):
+            if not os.listdir(path_to_check): # Check if directory is empty
                 os.rmdir(path_to_check)
                 print(f"Removed empty directory: {path_to_check}")
                 # Recursively try to clean up parent directory
                 cleanup_empty_dirs(os.path.dirname(path_to_check), base_folder_path)
         except OSError as e:
-            # This can happen if another process/thread accesses dir, or if it's not actually empty due to hidden files
             print(f"Error removing or checking directory {path_to_check}: {e}")
 
+    # Cleanup for UPLOAD directory (based on client_identifier's path)
     client_identifier = task_details.get("client_identifier", "")
-    if client_identifier and os.path.dirname(client_identifier): # If there was a path component
-        # Secure the path components before joining
-        relative_dir_parts = [secure_filename(part) for part in os.path.dirname(client_identifier).split(os.sep) if part and part != '.']
-        if relative_dir_parts:
-            upload_sub_dir_leaf = os.path.join(UPLOAD_FOLDER, *relative_dir_parts)
-            output_sub_dir_leaf = os.path.join(OUTPUT_FOLDER, *relative_dir_parts)
-            cleanup_empty_dirs(upload_sub_dir_leaf, UPLOAD_FOLDER)
-            cleanup_empty_dirs(output_sub_dir_leaf, OUTPUT_FOLDER)
+    upload_dir_to_check = None
+    if client_identifier:
+        path_dirname = os.path.dirname(client_identifier)
+        if path_dirname and path_dirname != '.': # If there was a path component
+            upload_relative_parts = [secure_filename(part) for part in path_dirname.split(os.sep) if part and part != '.']
+            if upload_relative_parts:
+                # This gets the specific subdirectory where the uploaded file was.
+                upload_dir_to_check = os.path.join(UPLOAD_FOLDER, *upload_relative_parts)
+
+
+    # If an input_ply_path was present, its directory is a candidate for cleanup.
+    # This is more reliable if the file itself was in a subfolder of UPLOAD_FOLDER.
+    if input_ply_path:
+        upload_dir_to_check = os.path.dirname(input_ply_path)
+
+    if upload_dir_to_check:
+        cleanup_empty_dirs(upload_dir_to_check, UPLOAD_FOLDER)
+
+
+    # Cleanup for OUTPUT directory (based on original_filename for the new structure)
+    original_filename = task_details.get("original_filename")
+    output_sogs_file_path = task_details.get("output_sogs_path") # This is the full path to the .sogs file
+
+    if output_sogs_file_path: # If we have a path for the output file
+        # The directory containing the .sogs file is what we want to clean up
+        output_dir_to_check = os.path.dirname(output_sogs_file_path)
+        if output_dir_to_check and output_dir_to_check != OUTPUT_FOLDER:
+             # We expect output_dir_to_check to be something like /output/filename_base
+             # After removing the .sogs file itself, if this directory is empty, remove it.
+            cleanup_empty_dirs(output_dir_to_check, OUTPUT_FOLDER)
+    elif original_filename: # Fallback if output_sogs_path wasn't set but we have original_filename
+        output_filename_base = original_filename.rsplit('.', 1)[0]
+        output_dir_to_check = os.path.join(OUTPUT_FOLDER, output_filename_base)
+        cleanup_empty_dirs(output_dir_to_check, OUTPUT_FOLDER)
 
 
 def run_sogs_conversion(task_id, input_ply_path, output_sogs_path, original_filename):
@@ -164,7 +250,11 @@ def run_sogs_conversion(task_id, input_ply_path, output_sogs_path, original_file
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    with tasks_lock:
+        # Create a serializable copy of tasks to pass to the template
+        # Sort tasks by creation time, newest first, or some other sensible order
+        sorted_tasks = sorted(conversion_tasks.values(), key=lambda t: t.get('created_at', 0), reverse=True)
+    return render_template('index.html', existing_tasks=json.dumps(sorted_tasks))
 
 @app.route('/upload', methods=['POST'])
 def upload_file_route():
@@ -184,24 +274,27 @@ def upload_file_route():
 
         current_time = time.time()
         path_dirname = os.path.dirname(relative_path)
-        relative_path_parts = [secure_filename(part) for part in path_dirname.split(os.sep) if part and part != '.'] if path_dirname else []
+        upload_relative_parts = [secure_filename(part) for part in path_dirname.split(os.sep) if part and part != '.'] if path_dirname else []
 
-        upload_sub_dir = os.path.join(app.config['UPLOAD_FOLDER'], *relative_path_parts)
-        output_sub_dir = os.path.join(app.config['OUTPUT_FOLDER'], *relative_path_parts)
+        upload_sub_dir = os.path.join(app.config['UPLOAD_FOLDER'], *upload_relative_parts)
+
+        # New output directory structure: /output/{original_filename_without_ext}/
+        output_filename_base = original_filename.rsplit('.', 1)[0]
+        output_sub_dir = os.path.join(app.config['OUTPUT_FOLDER'], output_filename_base)
 
         os.makedirs(upload_sub_dir, exist_ok=True)
-        os.makedirs(output_sub_dir, exist_ok=True)
+        os.makedirs(output_sub_dir, exist_ok=True) # Ensure this new output directory is created
 
         input_ply_path = os.path.join(upload_sub_dir, original_filename)
-        output_sogs_filename = original_filename.rsplit('.', 1)[0] + '.sogs'
-        output_sogs_path = os.path.join(output_sub_dir, output_sogs_filename)
+        output_sogs_filename = original_filename.rsplit('.', 1)[0] + '.sogs' # sogs file will have the same name as original ply
+        output_sogs_path = os.path.join(output_sub_dir, output_sogs_filename) # Saved inside the new output_sub_dir
 
         file.save(input_ply_path)
 
         with tasks_lock:
             conversion_tasks[task_id] = {
                 "task_id": task_id,
-                "status": "uploaded",
+                "status": "queued", # Changed from "uploaded"
                 "original_filename": original_filename,
                 "client_identifier": relative_path,
                 "input_ply_path": input_ply_path,
@@ -209,17 +302,22 @@ def upload_file_route():
                 "progress": 0,
                 "message": "File uploaded, queued for conversion.",
                 "created_at": current_time,
-                "updated_at": current_time
+                "updated_at": current_time,
+                "file_size": file.content_length # Store file size
             }
 
-        conversion_thread = threading.Thread(target=run_sogs_conversion, args=(task_id, input_ply_path, output_sogs_path, original_filename))
-        conversion_thread.start()
+        task_queue.put(task_id) # Add task_id to the queue
+        print(f"Task {task_id} added to queue. Queue size: {task_queue.qsize()}")
+
+        # Remove the direct thread start:
+        # conversion_thread = threading.Thread(target=run_sogs_conversion, args=(task_id, input_ply_path, output_sogs_path, original_filename))
+        # conversion_thread.start()
 
         return jsonify({
-            "message": "File upload successful, conversion started.",
+            "message": "File upload successful, conversion queued.", # Message updated
             "task_id": task_id,
             "client_identifier": relative_path,
-            "initial_status": conversion_tasks[task_id]
+            "initial_status": conversion_tasks[task_id] # Send the 'queued' status
         }), 202
     else:
         return jsonify({"error": "File type not allowed"}), 400
@@ -341,8 +439,12 @@ def automatic_cleanup_job():
 
 
 if __name__ == '__main__':
-    # Start the cleanup thread as a daemon so it exits when the main app exits
+    # Start the cleanup thread
     cleanup_thread = threading.Thread(target=automatic_cleanup_job, daemon=True)
     cleanup_thread.start()
+
+    # Start the conversion worker thread
+    worker_thread = threading.Thread(target=conversion_worker, daemon=True)
+    worker_thread.start()
 
     app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)

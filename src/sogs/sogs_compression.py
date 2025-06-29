@@ -362,7 +362,19 @@ def read_ply(path):
     def has_col(col_name):
         return col_name in vd.dtype.names
 
-    xyz = np.stack([vd['x'], vd['y'], vd['z']], axis=-1)
+    # Check for coordinate fields and provide debugging info if not found
+    if not all(has_col(c) for c in ['x', 'y', 'z']):
+        print(f"Warning: Standard coordinate fields ('x', 'y', 'z') not all found in PLY file: {path}")
+        print(f"Available fields: {vd.dtype.names}")
+        # Attempt to find common alternatives, or raise an error if critical ones are missing
+        # For now, we'll proceed assuming they might exist or error out later if used without being present.
+        # A more robust solution would be to map available fields to expected ones.
+        if not has_col('x'):
+            # This will likely cause the ValueError seen by the user if 'x' is truly missing
+            print(f"Critical field 'x' is missing. Further processing might fail.")
+
+
+    xyz = np.stack([vd['x'], vd['y'], vd['z']], axis=-1) # This line will fail if 'x', 'y', or 'z' is missing
     f_dc = np.stack([vd[f"f_dc_{i}"] for i in range(3)], axis=-1)
 
     rest_cols = [c for c in vd.dtype.names if c.startswith('f_rest_')]

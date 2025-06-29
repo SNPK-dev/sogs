@@ -311,4 +311,62 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initial check for no active conversions message
     updateNoActiveConversionsVisibility();
+
+    function loadExistingTasks() {
+        const existingTasksDataElement = document.getElementById('existing-tasks-data');
+        if (existingTasksDataElement && existingTasksDataElement.textContent) {
+            try {
+                const tasks = JSON.parse(existingTasksDataElement.textContent);
+                if (tasks && tasks.length > 0) {
+                    tasks.forEach(task => {
+                        // We don't have the 'File' object here, so pass what's available
+                        // addFileToListUI expects a file object for size, but we can adapt
+                        const mockFile = {
+                            name: task.original_filename,
+                            size: task.file_size || 0, // Add file_size to task data if available, else 0
+                            webkitRelativePath: task.client_identifier
+                        };
+
+                        // Avoid re-adding if somehow already present (e.g., dev refresh)
+                        if (document.querySelector(`.file-item[data-identifier="${CSS.escape(task.client_identifier)}"]`)) {
+                            console.log(`Task ${task.client_identifier} already in UI during load. Updating.`);
+                             // If it exists, find its UI elements and update.
+                            const item = document.querySelector(`.file-item[data-identifier="${CSS.escape(task.client_identifier)}"]`);
+                            const uiElements = {
+                                item: item,
+                                progressBar: item.querySelector('.progress-bar'),
+                                statusMessage: item.querySelector('.status-message'),
+                                downloadBtn: item.querySelector('.download-btn'),
+                                deleteBtn: item.querySelector('.delete-btn'),
+                                progressBarContainer: item.querySelector('.progress-bar-container')
+                            };
+                            updateFileItemUI(task.client_identifier, task, uiElements);
+                             // Attach delete handler with task ID
+                            uiElements.deleteBtn.onclick = () => handleDelete(task.client_identifier, uiElements.item, task.task_id);
+
+                            if (task.status !== 'completed' && task.status !== 'failed' && task.status !== 'error') {
+                                listenForProgress(task.task_id, task.client_identifier, uiElements);
+                            }
+
+                        } else {
+                            const uiElements = addFileToListUI(mockFile, task.client_identifier);
+                            // Set the task_id on the delete button immediately
+                            uiElements.deleteBtn.onclick = () => handleDelete(task.client_identifier, uiElements.item, task.task_id);
+
+                            updateFileItemUI(task.client_identifier, task, uiElements);
+
+                            if (task.status !== 'completed' && task.status !== 'failed' && task.status !== 'error') {
+                                listenForProgress(task.task_id, task.client_identifier, uiElements);
+                            }
+                        }
+                    });
+                    updateNoActiveConversionsVisibility();
+                }
+            } catch (e) {
+                console.error("Error parsing existing tasks data:", e);
+            }
+        }
+    }
+
+    loadExistingTasks(); // Call on initial script load
 });
