@@ -6,6 +6,7 @@ import time
 import json
 import threading
 import queue # Added for task queue
+import re # For sanitizing filenames
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 from werkzeug.utils import secure_filename
 
@@ -29,6 +30,25 @@ conversion_tasks = {}
 tasks_lock = threading.Lock()
 task_queue = queue.Queue() # Initialize the task queue
 
+def sanitize_filename_component(name_component):
+    """
+    Sanitizes a string to be a safe filename component.
+    Replaces spaces with underscores.
+    Removes characters that are not alphanumeric, underscore, hyphen, or period.
+    Keeps original case.
+    """
+    if name_component is None:
+        return "unknown"
+    # Replace spaces with underscores first
+    s = name_component.replace(" ", "_")
+    # Remove or replace other problematic characters (excluding period for file extensions)
+    # Allow alphanumeric, underscore, hyphen.
+    s = re.sub(r'[^\w\-\.]', '', s)
+    # Ensure it's not empty
+    if not s:
+        s = "sanitized_empty_name"
+    return s
+
 def conversion_worker():
     print("Conversion worker thread started.")
     while True:
@@ -47,20 +67,21 @@ def conversion_worker():
 
             if task_details and task_details.get("status") == "queued":
                 input_ply_path = task_details.get("input_ply_path")
-                output_sogs_path = task_details.get("output_sogs_path")
+                # output_sogs_path is no longer passed to run_sogs_conversion directly
                 original_filename = task_details.get("original_filename")
+                output_item_specific_dir = task_details.get("output_item_specific_dir") # Added for check
 
-                if not all([input_ply_path, output_sogs_path, original_filename]):
-                    print(f"Worker: Task {task_id} is missing critical path/name info. Setting to failed.")
+                if not all([input_ply_path, original_filename, output_item_specific_dir]): # Check output_item_specific_dir
+                    print(f"Worker: Task {task_id} is missing critical path/name info (input_ply_path, original_filename, or output_item_specific_dir). Setting to failed.")
                     with tasks_lock:
                         conversion_tasks[task_id]["status"] = "failed"
-                        conversion_tasks[task_id]["message"] = "Internal error: Task data incomplete."
+                        conversion_tasks[task_id]["message"] = "Internal error: Task data incomplete for paths."
                         conversion_tasks[task_id]["updated_at"] = time.time()
                     task_queue.task_done()
                     continue
 
-                # Actual conversion call
-                run_sogs_conversion(task_id, input_ply_path, output_sogs_path, original_filename)
+                # Actual conversion call - output_sogs_path removed from args
+                run_sogs_conversion(task_id, input_ply_path, original_filename)
             else:
                 # This might happen if task was deleted or status changed before worker picked it up
                 print(f"Worker: Task {task_id} not in 'queued' state or details missing. Current state: {task_details.get('status') if task_details else 'N/A'}")
@@ -190,11 +211,31 @@ def perform_file_deletion(task_id, task_details):
                  cleanup_empty_dirs(zip_dir, OUTPUT_FOLDER)
 
 
-def run_sogs_conversion(task_id, input_ply_path, output_sogs_path, original_filename):
+def run_sogs_conversion(task_id, input_ply_path, original_filename): # output_sogs_path removed, will use output_item_specific_dir
     global conversion_tasks
 
-    output_dir_for_sogs = os.path.dirname(output_sogs_path)
-    cmd = ['sogs-compress', '--ply', input_ply_path, '--output-dir', output_dir_for_sogs]
+    task_details = None
+    with tasks_lock:
+        task_details = conversion_tasks.get(task_id)
+
+    if not task_details:
+        print(f"run_sogs_conversion: Task {task_id} not found. Aborting.")
+        return
+
+    # This is the sanitized directory, e.g., output/My_Model
+    output_dir_for_sogs_assets = task_details.get("output_item_specific_dir")
+    if not output_dir_for_sogs_assets:
+        print(f"run_sogs_conversion: output_item_specific_dir not found for task {task_id}. Aborting.")
+        with tasks_lock:
+            conversion_tasks[task_id]["status"] = "failed"
+            conversion_tasks[task_id]["message"] = "Internal error: output directory for assets not configured."
+            conversion_tasks[task_id]["updated_at"] = time.time()
+        return
+
+    # Ensure this directory exists (it should have been created during upload)
+    os.makedirs(output_dir_for_sogs_assets, exist_ok=True)
+
+    cmd = ['sogs-compress', '--ply', input_ply_path, '--output-dir', output_dir_for_sogs_assets]
 
     try:
         with tasks_lock:
@@ -236,21 +277,27 @@ def run_sogs_conversion(task_id, input_ply_path, output_sogs_path, original_file
                 task_data["message"] = "SOGS conversion complete, packaging output..."
 
                 # Retrieve the true filename base stored during upload
-                true_filename_base = task_data.get("true_filename_base")
-                if not true_filename_base:
+                raw_true_filename_base = task_data.get("true_filename_base")
+                if not raw_true_filename_base:
                     # Fallback for safety, though this shouldn't happen with new uploads
-                    print(f"Warning: true_filename_base not found for task {task_id}. Falling back to original_filename.")
-                    true_filename_base = original_filename.rsplit('.', 1)[0]
+                    print(f"Warning: true_filename_base not found for task {task_id}. Falling back to original_filename base.")
+                    raw_true_filename_base = original_filename.rsplit('.', 1)[0]
 
-                zip_filename_base = true_filename_base # Use the correct base name for the zip file
+                # Sanitize the filename base for use in ZIP path and internal directory naming
+                sane_zip_filename_base = sanitize_filename_component(raw_true_filename_base)
 
-                # output_dir_for_sogs is 'output/true_filename_base_from_upload/'
-                # The zip file should be placed in OUTPUT_FOLDER, so its parent is app.config['OUTPUT_FOLDER']
-                # Example: output_dir_for_sogs = 'output/My Model'
-                # os.path.dirname(output_dir_for_sogs) = 'output'
-                # zip_path should be 'output/My Model.sogs.zip'
+                # output_dir_for_sogs is already 'output/sane_true_filename_base_from_upload/'
+                # because true_filename_base was sanitized before creating output_sub_dir in upload route.
+                # So, os.path.dirname(output_dir_for_sogs) will be 'output' if output_dir_for_sogs is 'output/sane_base'
+                # or 'output/some_subdir' if it's nested.
+                # The zip file should be placed in the main OUTPUT_FOLDER (app.config['OUTPUT_FOLDER'])
 
-                zip_path = os.path.join(os.path.dirname(output_dir_for_sogs), f"{zip_filename_base}.sogs.zip")
+                zip_path = os.path.join(app.config['OUTPUT_FOLDER'], f"{sane_zip_filename_base}.sogs.zip")
+                # The first argument to make_archive should be the path to the zip *without* the .zip extension
+                zip_archive_base_path = os.path.join(app.config['OUTPUT_FOLDER'], sane_zip_filename_base + ".sogs")
+
+                # Ensure output_dir_for_sogs contains the files to be zipped.
+                # output_dir_for_sogs itself is named based on the sanitized true_filename_base.
 
                 # Ensure output_dir_for_sogs contains the files to be zipped.
                 # output_dir_for_sogs itself is named based on true_filename_base due to changes in upload route.
@@ -258,22 +305,16 @@ def run_sogs_conversion(task_id, input_ply_path, output_sogs_path, original_file
                 try:
                     output_files = os.listdir(output_dir_for_sogs)
                     if output_files:
-                        # Call shutil.make_archive without the with statement
-                        # It returns the path to the archive, which should be zip_path.
-                        # We already define zip_path correctly.
-                        actual_archive_path = shutil.make_archive(zip_path.replace('.sogs.zip', ''), 'zip', root_dir=output_dir_for_sogs, base_dir='.')
-                        # shutil.make_archive appends .zip, so zip_path should be the final path.
-                        # For safety, we can check if actual_archive_path matches zip_path or assign it.
-                        # However, zip_path is constructed to be the target, e.g. 'output/filename.sogs.zip'
-                        # and make_archive base_name would be 'output/filename.sogs'
+                        # Call shutil.make_archive.
+                        # The first argument is base_name_for_archive (e.g. output/sanitized_name.sogs)
+                        # It will create output/sanitized_name.sogs.zip
+                        actual_archive_path = shutil.make_archive(zip_archive_base_path, 'zip', root_dir=output_dir_for_sogs, base_dir='.')
 
-                        # Ensure zip_path is what we expect after make_archive (it should append .zip to the base name)
-                        # If zip_path was 'output/base.sogs.zip', then base for make_archive is 'output/base.sogs'
-                        # make_archive will create 'output/base.sogs.zip'
+                        # actual_archive_path should be equal to zip_path after this.
+                        # For robustness, we check os.path.exists(zip_path) which uses the pre-calculated sane path.
 
-                        # Verify zip creation and update task data
-                        if os.path.exists(zip_path): # Check the expected zip_path
-                            print(f"Successfully created ZIP archive: {zip_path} from directory {output_dir_for_sogs}")
+                        if os.path.exists(zip_path): # Check the expected zip_path constructed with sanitized name
+                            print(f"Successfully created ZIP archive: {zip_path} (actual: {actual_archive_path}) from directory {output_dir_for_sogs}")
                             task_data["output_sogs_path"] = zip_path # This is the path to the zip file
                             task_data["message"] = "Conversion successful. Output packaged as ZIP."
 
@@ -381,37 +422,48 @@ def upload_file_route():
 
         # Determine the true base name from the original file upload (before secure_filename for path saving)
         # file.filename is the original name like "My Model 1.ply"
-        true_original_filename_full = file.filename
-        true_filename_base = true_original_filename_full.rsplit('.', 1)[0]
+        raw_true_original_filename_full = file.filename # e.g., "Модель Гудеа с пробелами.ply"
+        raw_true_filename_base = raw_true_original_filename_full.rsplit('.', 1)[0] # e.g., "Модель Гудеа с пробелами"
+
+        # Sanitize this base name for use in directory creation and for storing
+        sane_true_filename_base = sanitize_filename_component(raw_true_filename_base) # e.g., "Модель_Гудеа_с_пробелами"
 
         # original_filename is for the *saved* .ply file, possibly modified by secure_filename
         # e.g., if file.filename was "../../../My Model 1.ply", original_filename would be "My_Model_1.ply"
-        # This is correct for saving the input file.
+        # This is correct for saving the input .ply file.
 
-        # The output subdirectory should be based on the true_filename_base
-        output_sub_dir = os.path.join(app.config['OUTPUT_FOLDER'], true_filename_base)
+        # The output subdirectory for individual SOGS assets should be based on the SANITIZED true_filename_base
+        output_item_specific_dir = os.path.join(app.config['OUTPUT_FOLDER'], sane_true_filename_base)
 
         os.makedirs(upload_sub_dir, exist_ok=True)
-        os.makedirs(output_sub_dir, exist_ok=True)
+        os.makedirs(output_item_specific_dir, exist_ok=True) # Use sanitized name for directory
 
-        input_ply_path = os.path.join(upload_sub_dir, original_filename) # original_filename is secure name for saving
+        input_ply_path = os.path.join(upload_sub_dir, original_filename) # original_filename is secure name for saving input .ply
 
-        # The .sogs file *inside* the output_sub_dir should also use the true_filename_base
-        output_sogs_filename = true_filename_base + '.sogs'
-        output_sogs_path = os.path.join(output_sub_dir, output_sogs_filename)
+        # The path stored in 'output_sogs_path' initially points to where the *individual* .sogs assets are expected
+        # by sogs-compress (inside output_item_specific_dir).
+        # This will be updated to the ZIP path after successful packaging.
+        # The sogs-compress command expects an *output directory*.
+        # The actual .sogs file *name* inside this directory is determined by sogs-compress,
+        # but it should be based on the input PLY name (which is original_filename, secure one).
+        # Let's assume sogs-compress uses the input PLY's base name.
+        # The crucial part is that output_item_specific_dir is sane.
 
-        file.save(input_ply_path)
-
+        # Store the RAW true_filename_base, as sanitization will happen in run_sogs_conversion
+        # when constructing the final ZIP name. The output_item_specific_dir uses the sanitized one.
         with tasks_lock:
             conversion_tasks[task_id] = {
                 "task_id": task_id,
                 "status": "queued",
-                "original_filename": original_filename, # This is secure_filename(file.filename)
-                "true_filename_base": true_filename_base, # Store the actual base for zip naming
+                "original_filename": original_filename, # This is secure_filename(file.filename) for the input .ply
+                "true_filename_base": raw_true_filename_base, # Store the RAW actual base for zip naming
                 "client_identifier": relative_path,
                 "input_ply_path": input_ply_path,
-                "output_sogs_path": output_sogs_path,
-                "output_item_specific_dir": output_sub_dir,
+                # output_sogs_path will be updated to the ZIP path by run_sogs_conversion.
+                # Initially, it's not critical what this holds, as run_sogs_conversion constructs the final zip path.
+                # Let's set it to None initially, or point to the directory where sogs-compress writes.
+                "output_sogs_path": None, # Will be set to the path of the final .sogs.zip file
+                "output_item_specific_dir": output_item_specific_dir, # Directory for sogs-compress output (uses sane_true_filename_base)
                 "progress": 0,
                 "message": "File uploaded, queued for conversion.",
                 "created_at": current_time,
