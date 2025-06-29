@@ -47,10 +47,17 @@ document.addEventListener('DOMContentLoaded', () => {
             for (let i = 0; i < items.length; i++) {
                 const item = items[i].webkitGetAsEntry();
                 if (item) {
+                try {
+                    console.log("Processing dropped item:", item.name);
                     await processEntry(item, files, ""); // Pass initial base path as empty
+                } catch (error) {
+                    console.error("Error processing a top-level dropped item:", item.name, error);
+                    // Potentially alert user for this specific item's failure
+                }
                 }
             }
         }
+    console.log("All dropped items initially processed. Total files collected:", files.length);
         processPlyFiles(files);
     }
 
@@ -88,25 +95,39 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (entry.isDirectory) {
             const directoryReader = entry.createReader();
             const newPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+            console.log("Reading directory:", newPath);
             await new Promise((resolve, reject) => {
                 directoryReader.readEntries(async (entries) => {
+                    console.log(`Found ${entries.length} entries in directory ${entry.name}`);
                     for (const subEntry of entries) {
-                        await processEntry(subEntry, filesArray, newPath);
+                        try {
+                            console.log("Processing sub-entry:", subEntry.name, "in path:", newPath);
+                            await processEntry(subEntry, filesArray, newPath);
+                        } catch (error) {
+                            console.error("Error processing a directory sub-entry:", subEntry.name, "in path:", newPath, error);
+                            // Continue with other sub-entries
+                        }
                     }
                     resolve();
                 }, err => {
-                    console.error("Error reading directory entries:", err);
-                    reject(err);
+                    console.error("Error reading directory entries for:", entry.name, err);
+                    reject(err); // This error will be caught by the caller of processEntry
                 });
             });
         }
     }
 
     function processPlyFiles(allFiles) {
+    console.log(`processPlyFiles called with ${allFiles.length} total files collected.`);
         const plyFiles = allFiles.filter(file => file.name.toLowerCase().endsWith('.ply') && file.size > 0);
+    console.log(`Filtered PLY files. Count: ${plyFiles.length}`, plyFiles.map(f => f.webkitRelativePath || f.name));
 
         if (plyFiles.length === 0) {
-            alert("No .ply files found in the selection.");
+        if(allFiles.length > 0) {
+            alert("No .ply files found in the selection. Please ensure files have a .ply extension and are not empty.");
+        } else {
+            console.log("No files were collected to process for PLY filtering.");
+        }
             return;
         }
 
