@@ -318,8 +318,8 @@ def run_sogs_conversion(task_id, input_ply_path, original_filename): # output_so
                         # Call shutil.make_archive.
                         # The first argument is base_name_for_archive (e.g. output/sanitized_name.sogs)
                         # It will create output/sanitized_name.sogs.zip
-                        actual_archive_path = shutil.make_archive(zip_archive_base_path, 'zip', root_dir=output_dir_for_sogs, base_dir='.')
-
+                        actual_archive_path = shutil.make_archive(zip_archive_base_path, 'zip', root_dir=output_dir_for_sogs_assets, base_dir='.')
+                        
                         # actual_archive_path should be equal to zip_path after this.
                         # For robustness, we check os.path.exists(zip_path) which uses the pre-calculated sane path.
 
@@ -350,7 +350,7 @@ def run_sogs_conversion(task_id, input_ply_path, original_filename): # output_so
                             task_data["status"] = "failed"
                             task_data["message"] = "Conversion successful, but failed to package output."
                     else:
-                        print(f"Warning: Output directory '{output_dir_for_sogs}' is empty. No ZIP created for task {task_id}.")
+                        print(f"Warning: Output directory '{output_dir_for_sogs_assets}' is empty. No ZIP created for task {task_id}.")
                         task_data["status"] = "failed"
                         task_data["message"] = "Conversion completed, but no output files were generated to package."
 
