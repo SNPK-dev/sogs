@@ -235,6 +235,16 @@ def run_sogs_conversion(task_id, input_ply_path, original_filename): # output_so
     # Ensure this directory exists (it should have been created during upload)
     os.makedirs(output_dir_for_sogs_assets, exist_ok=True)
 
+    # ---- Debug: Check if input_ply_path exists before calling sogs-compress ----
+    if os.path.exists(input_ply_path):
+        print(f"run_sogs_conversion: Input PLY file '{input_ply_path}' FOUND before calling sogs-compress for task {task_id}.")
+    else:
+        print(f"run_sogs_conversion: CRITICAL - Input PLY file '{input_ply_path}' NOT FOUND before calling sogs-compress for task {task_id}. This will likely fail.")
+        # Optionally, we could fail the task here to prevent sogs-compress error,
+        # but letting it fail will also provide the FileNotFoundError from sogs-compress.
+        # For now, just log and let it proceed to see the sogs-compress error.
+    # ---- End Debug ----
+
     cmd = ['sogs-compress', '--ply', input_ply_path, '--output-dir', output_dir_for_sogs_assets]
 
     try:
@@ -438,7 +448,10 @@ def upload_file_route():
         os.makedirs(upload_sub_dir, exist_ok=True)
         os.makedirs(output_item_specific_dir, exist_ok=True) # Use sanitized name for directory
 
-        input_ply_path = os.path.join(upload_sub_dir, original_filename) # original_filename is secure name for saving input .ply
+        # Create a unique filename for the input PLY to avoid conflicts if original_filename is reused across tasks.
+        # original_filename is already secure_filename(file.filename)
+        unique_input_filename = f"{task_id}_{original_filename}"
+        input_ply_path = os.path.join(upload_sub_dir, unique_input_filename)
 
         # The path stored in 'output_sogs_path' initially points to where the *individual* .sogs assets are expected
         # by sogs-compress (inside output_item_specific_dir).
