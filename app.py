@@ -422,8 +422,11 @@ def upload_file_route():
 
     if file and allowed_file(file.filename):
         original_filename = secure_filename(file.filename)
-        task_id = str(uuid.uuid4())
+        if not original_filename: # Handle cases where secure_filename might return empty
+            print(f"Error: secure_filename resulted in an empty filename from original '{file.filename}'. Rejecting upload.")
+            return jsonify({"error": "Invalid filename after sanitization. Please use a valid filename."}), 400
 
+        task_id = str(uuid.uuid4())
         current_time = time.time()
         path_dirname = os.path.dirname(relative_path)
         upload_relative_parts = [secure_filename(part) for part in path_dirname.split(os.sep) if part and part != '.'] if path_dirname else []
@@ -448,10 +451,29 @@ def upload_file_route():
         os.makedirs(upload_sub_dir, exist_ok=True)
         os.makedirs(output_item_specific_dir, exist_ok=True) # Use sanitized name for directory
 
-        # Create a unique filename for the input PLY to avoid conflicts if original_filename is reused across tasks.
-        # original_filename is already secure_filename(file.filename)
+        # Construct the unique filename and the full path for saving the uploaded .ply file
         unique_input_filename = f"{task_id}_{original_filename}"
         input_ply_path = os.path.join(upload_sub_dir, unique_input_filename)
+
+        print(f"Attempting to save uploaded file to: {input_ply_path} (original: {file.filename}, client_id: {relative_path})")
+
+        try:
+            file.save(input_ply_path) # THE ACTUAL SAVE OPERATION
+
+            # Check immediately if the file was written
+            if os.path.exists(input_ply_path):
+                file_size = os.path.getsize(input_ply_path)
+                print(f"SUCCESS: File '{input_ply_path}' saved and exists. Size: {file_size} bytes.")
+                if file_size == 0:
+                    print(f"WARNING: File '{input_ply_path}' is 0 bytes after saving. Original content_length: {file.content_length}")
+            else:
+                print(f"CRITICAL FAILURE: File '{input_ply_path}' does NOT exist immediately after file.save() call!")
+                # This is a serious issue, as the file save operation did not result in a file at the target location.
+                return jsonify({"error": "Failed to save uploaded file. File not found after save attempt."}), 500
+        except Exception as e_save:
+            print(f"ERROR DURING file.save() for path '{input_ply_path}': {e_save}")
+            app.logger.exception(f"Exception details during file.save() for {input_ply_path}:") # Detailed exception log
+            return jsonify({"error": f"Failed to save uploaded file due to server error: {str(e_save)}"}), 500
 
         # The path stored in 'output_sogs_path' initially points to where the *individual* .sogs assets are expected
         # by sogs-compress (inside output_item_specific_dir).
